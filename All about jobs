@@ -1,0 +1,114 @@
+	1. Check enable and disable jobs
+	
+Select * from MSDB..SYSJOBS
+
+	2. ON or OFF Agent himself
+ EXEC xp_servicecontrol N'stop',N'SQLServerAGENT'
+EXEC xp_servicecontrol N'start',N'SQLServerAGENT'
+
+
+3. This will enable or disable a single jobs
+Exec msdb..sp_update_job @job_name ='Job Name', @enabled=0--Disable
+Exec msdb..sp_update_job @job_name ='Job Name', @enabled=1--Enable
+
+
+	4. generate disable all jobs
+SELECT 'exec msdb..sp_update_job @job_name = '''+NAME+''', @enabled = 0' FROM msdb..sysjobs
+
+
+	5. generate enable all jobs
+SELECT 'exec msdb..sp_update_job @job_name = '''+NAME+''', @enabled = 1' FROM msdb..sysjobs
+
+From <https://www.sqlservercentral.com/forums/topic/disable-all-the-sql-jobs-at-once> 
+
+	6. Check last run day jobs
+select j.job_id,
+j.name,
+js.step_id,
+js.step_name,
+last_run_outcome = case when js.last_run_outcome = 0 then 'Failed'
+when js.last_run_outcome = 1 then 'Succeeded'
+when js.last_run_outcome = 2 then 'Retry'
+when js.last_run_outcome = 3 then 'Canceled'
+else 'Unknown'
+end,
+last_run_datetime = msdb.dbo.agent_datetime(
+case when js.last_run_date = 0 then NULL else js.last_run_date end,
+case when js.last_run_time = 0 then NULL else js.last_run_time end)
+from msdb.dbo.sysjobs j
+inner join msdb.dbo.sysjobsteps js
+on j.job_id = js.job_id;
+
+
+	7. Find the schedule of a SQL Server Agent
+
+SELECT j.name AS JobName, s.name AS ScheduleName, s.freq_type, s.freq_interval, 
+s.freq_subday_type, s.freq_subday_interval, s.freq_relative_interval, 
+s.freq_recurrence_factor, s.active_start_date, s.active_end_date, s.active_start_time, 
+s.active_end_time
+FROM msdb.dbo.sysjobs j
+JOIN msdb.dbo.sysjobschedules js ON j.job_id = js.job_id
+JOIN msdb.dbo.sysschedules s ON js.schedule_id = s.schedule_id
+WHERE j.name = 'YourJobName';
+
+
+	8. Collect all jobs failled last 24hours
+DECLARE @Layer VARCHAR(30); SET  @Layer = '[CMSServerLayer]'
+
+DECLARE @dt CHAR(8);
+SET  @dt=CONVERT(CHAR(8),DATEADD(hh,-24,GETDATE()),112)   
+SELECT
+CONVERT(varchar(128),@@SERVERNAME) As Servername,
+SUBSTRING(T2.name,1,140) AS [SQL Job Name],
+--msdb.dbo.agent_datetime(run_date, run_time) as 'RunDateTime',
+COUNT(*) AS TotalFailures,
+CAST(MIN(CONVERT(DATETIME,CAST(run_date AS CHAR(8)),101)) AS CHAR(11)) AS [MinFailure Date],
+MAX(msdb.dbo.agent_datetime(T1.run_date, T1.run_time)) AS 'RunDateTime',
+MIN(T1.run_duration) StepDuration,
+CASE MIN(T1.run_status)
+WHEN 0 THEN 'Failed'
+WHEN 1 THEN 'Succeeded'
+WHEN 2 THEN 'Retry'
+WHEN 3 THEN 'Cancelled'
+WHEN 4 THEN 'In Progress'
+END AS ExecutionStatus
+
+FROM
+msdb..sysjobhistory T1 INNER JOIN msdb..sysjobs T2 ON T1.job_id = T2.job_id
+WHERE
+T1.run_status NOT IN (1,2,4)
+AND T1.step_id != 0
+AND run_date >= @dt
+GROUP BY 
+  T1.step_name,
+  T2.name
+
+--https://www.sqlservercentral.com/forums/topic/sql-agent-failed-job-report-last-24-hours-2
+--https://www.sqlservercentral.com/articles/a-failed-jobs-monitoring-system
+
+
+	9- Best script for  Jobs History
+
+select 
+ j.name as 'JobName',
+ s.step_id as 'Step',
+ s.step_name as 'StepName',
+ msdb.dbo.agent_datetime(run_date, run_time) as 'RunDateTime',
+ ((run_duration/10000*3600 + (run_duration/100)%100*60 + run_duration%100 + 31 ) / 60) 
+         as 'RunDurationMinutes'
+From msdb.dbo.sysjobs j 
+INNER JOIN msdb.dbo.sysjobsteps s 
+ ON j.job_id = s.job_id
+INNER JOIN msdb.dbo.sysjobhistory h 
+ ON s.job_id = h.job_id 
+ AND s.step_id = h.step_id 
+ AND h.step_id <> 0
+where j.enabled = 1   --Only Enabled Jobs
+and j.name like '%Database backup%' --Uncomment to search for a single job
+and j.name <> 'DBA_Database Backup.Transaction Log Backup' --Uncomment to search for a single job
+
+and 
+msdb.dbo.agent_datetime(run_date, run_time)
+ --< '2023-09-30 00:00:00.000'
+BETWEEN '2023-05-01 ' and '2023-09-30 '  --Uncomment for date range queries
+order by JobName, RunDateTime desc
