@@ -1,0 +1,58 @@
+SELECT 
+ @@servername AS ServerName,
+jobs.name
+,categories.NAME AS CategoryName
+ ,SUSER_SNAME(jobs.owner_sid) AS OwnerID
+ ,CASE WHEN jobs.enabled =1 THEN 'Yes' ELSE 'No'END AS JobEnabled
+ ,CASE WHEN syssch.enabled =1 THEN 'Yes' ELSE 'No' END AS JobScheduled
+ ,msdb.dbo.agent_datetime(sch.next_run_date, sch.next_run_time)NextRunDate
+,lastrunjobhist.LastRunDate
+,ISNULL(lastrunjobhist.run_status_desc,'Job Execution Unknown') AS run_status_desc
+,ISNULL(lastrunjobhist.RunTimeInSeconds, 0) AS RunTimeInSeconds
+,lastrunjobhist.message  
+
+FROM msdb.dbo.sysjobs AS jobs
+LEFT JOIN msdb.dbo.sysjobschedules AS sch
+ ON jobs.job_id = sch.job_id
+LEFT JOIN msdb.dbo.sysschedules AS syssch
+ ON sch.schedule_id = syssch.schedule_id
+INNER JOIN msdb.dbo.syscategories categories
+ ON jobs.category_id = categories.category_id
+LEFT OUTER JOIN (
+ SELECT sysjobhist.job_id
+ FROM msdb.dbo.sysjobhistory AS sysjobhist
+ WHERE sysjobhist.step_id = 0
+ GROUP BY sysjobhist.job_id
+ ) AS jobhist
+ ON jobhist.job_id = jobs.job_id  
+LEFT OUTER JOIN
+(
+SELECT sysjobhist.job_id,
+ msdb.dbo.agent_datetime(sysjobhist.run_date,sysjobhist.run_time)LastRunDate
+ ,sysjobhist.run_status
+ ,CASE sysjobhist.run_status
+  WHEN 0
+   THEN 'Job Failed'
+  WHEN 1
+   THEN 'Job Succeeded'
+  WHEN 2
+   THEN 'Job Execution Retry'
+  WHEN 3
+   THEN 'Job Execution Canceled'
+  WHEN 4
+   THEN 'Job Execution In Progress'
+  ELSE 'Job Status Unknown'
+  END AS run_status_desc
+ ,sysjobhist.run_duration AS RunTimeInSeconds
+ ,sysjobhist.message
+ ,ROW_NUMBER() OVER (
+  PARTITION BY sysjobhist.job_id ORDER BY 
+    msdb.dbo.agent_datetime(sysjobhist.run_date,sysjobhist.run_time)
+     DESC
+  ) AS RowOrder
+FROM msdb.dbo.sysjobhistory AS sysjobhist
+WHERE sysjobhist.step_id = 0  
+)AS lastrunjobhist
+ ON lastrunjobhist.job_id = jobs.job_id  
+ AND
+ lastrunjobhist.RowOrder=1
